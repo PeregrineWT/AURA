@@ -7,7 +7,6 @@
 
 // The dedicated FreeRTOS Heartbeat Task
 void heartbeat_task(void *pvParameters) {
-    int counter = 0;
     int led_state = 0;
 
     // 1. Initialize the xLastWakeTime variable with the current tick count.
@@ -21,10 +20,6 @@ void heartbeat_task(void *pvParameters) {
         // Toggle the LED
         led_state = !led_state;
         gpio_set_level(BLINK_GPIO, led_state);
-
-        // Print the message
-        printf("Hello world %d\n", counter);
-        counter++;
 
         // 2. Pause the task until exactly 1000ms have passed since the last wake time.
         // The RTOS automatically updates xLastWakeTime behind the scenes here.
