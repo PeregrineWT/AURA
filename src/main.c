@@ -20,6 +20,7 @@ void heartbeat_task(void *pvParameters) {
         // Toggle the LED
         led_state = !led_state;
         gpio_set_level(BLINK_GPIO, led_state);
+        printf("Test\n");
 
         // 2. Pause the task until exactly 1000ms have passed since the last wake time.
         // The RTOS automatically updates xLastWakeTime behind the scenes here.
