@@ -51,6 +51,28 @@ void generate_next_log_filename() {
 }
 
 // =========================================================================
+// HOW TO ADD A NEW SENSOR TASK (THE PRODUCER)
+// =========================================================================
+/*
+ * When you wire up a new sensor (like an IMU), you will write a new FreeRTOS 
+ * task similar to the heartbeat_task below. Here is the checklist for what 
+ * MUST be inside that new task to ensure data saves to the SD card:
+ * * 1. Declare a message packet: 
+ * LogMessage_t msg;
+ * * 2. Assign it a unique ID character so the SD logger recognizes it:
+ * msg.sensor_id = 'I'; // 'I' for IMU
+ * * 3. Grab the precise time the sensor was read:
+ * msg.timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
+ * * 4. Load your sensor readings into the float array (up to 7 values):
+ * msg.values[0] = gyro_x;
+ * msg.values[1] = gyro_y;
+ * msg.values[2] = gyro_z; 
+ * // ... continue filling array as needed
+ * * 5. Fire it into the queue with a 0 block time so it never stalls your task:
+ * xQueueSend(data_queue, &msg, 0);
+ */
+
+// =========================================================================
 // SYSTEM TASK: BACKGROUND HEARTBEAT
 // =========================================================================
 void heartbeat_task(void *pvParameters) {
@@ -105,7 +127,17 @@ void sd_logger_task(void *pvParameters) {
         vTaskDelete(NULL);
     }
     
-    // Header remains unchanged for now, as requested.
+    // ---------------------------------------------------------------------
+    // HOW TO MODIFY THE HEADER
+    // ---------------------------------------------------------------------
+    /*
+     * The CSV header defines the columns in Excel. When you add a new sensor, 
+     * simply append its column titles to this string.
+     * * Rule 1: DO NOT add spaces after the commas. 
+     * Rule 2: Keep track of exactly how many total columns you have.
+     * * Example: If you add an IMU (1 timestamp + 3 gyro values), update this to:
+     * fprintf(f, "Time_HB,State_HB,Time_IMU,Gyro_X,Gyro_Y,Gyro_Z\n");
+     */
     fprintf(f, "Time_HB,State_HB\n"); 
     fclose(f); 
 
@@ -130,6 +162,26 @@ void sd_logger_task(void *pvParameters) {
                     case 'H': 
                         fprintf(f, "%lu,%d\n", msg.timestamp, (int)msg.values[0]); 
                         break;
+                    
+                    // ---------------------------------------------------------
+                    // HOW TO ROUTE NEW SENSORS (THE SPARSE MATRIX)
+                    // ---------------------------------------------------------
+                    /*
+                     * To add a new sensor here, create a new `case` using its ID.
+                     * * THE COMMA RULE: You MUST inject leading commas to skip over 
+                     * the columns that belong to other sensors.
+                     * * Look at the header above: 
+                     * Column 1 & 2 = Heartbeat.
+                     * Column 3, 4, 5, 6 = IMU.
+                     * * Therefore, an IMU must drop TWO commas at the start of its 
+                     * string to skip the heartbeat columns.
+                     * * Example IMU Implementation:
+                     * case 'I':
+                     * fprintf(f, ",,%lu,%.2f,%.2f,%.2f\n", 
+                     * msg.timestamp, 
+                     * msg.values[0], msg.values[1], msg.values[2]);
+                     * break;
+                     */
                 }
             }
         }
