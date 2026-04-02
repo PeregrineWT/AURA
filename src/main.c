@@ -112,7 +112,7 @@ void sd_logger_task(void *pvParameters) {
     f = fopen(current_flight_log, "a");
 
     TickType_t last_sync_time = xTaskGetTickCount();
-    const TickType_t SYNC_INTERVAL_TICKS = pdMS_TO_TICKS(5000); 
+    const TickType_t SYNC_INTERVAL_TICKS = pdMS_TO_TICKS(2500); 
 
     printf("[SD_CARD] Logger task started. Waiting for sensor data...\n");
 
@@ -123,8 +123,8 @@ void sd_logger_task(void *pvParameters) {
                 switch (msg.sensor_id) {
                     
                     case 'S': 
-                        fprintf(f, "%lu,System Event Logged\n", msg.timestamp); 
-                        break;
+                        fprintf(f, "%lu,System Event Logged\n", msg.timestamp); // Useless code, no S events 
+                        break; 
 
                     // Heartbeat case now pulls from values[0]
                     case 'H': 
@@ -134,13 +134,15 @@ void sd_logger_task(void *pvParameters) {
             }
         }
 
-        // --- REAL-TIME 5-SECOND FLUSH CHECK ---
+        // --- REAL-TIME 2.5-SECOND FLUSH CHECK ---
         TickType_t current_time = xTaskGetTickCount();
         
         if ((current_time - last_sync_time) >= SYNC_INTERVAL_TICKS) {
             if (f != NULL) {
-                fclose(f); 
+                fclose(f);
+                printf("MicroSD Closed to save\n"); 
                 f = fopen(current_flight_log, "a"); 
+                printf("MicroSD reopened\n");
             }
             last_sync_time = current_time; 
         }
