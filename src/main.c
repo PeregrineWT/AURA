@@ -76,7 +76,7 @@ void app_main(void) {
     gpio_set_direction(ECHO_A, GPIO_MODE_INPUT);
     gpio_set_direction(ECHO_B, GPIO_MODE_INPUT);
     gpio_set_direction(ECHO_C, GPIO_MODE_INPUT);
-    gpio_set_direction(ECHO_D, GPIO_MODE_INPUT);
+    gpio_set_direction(ECHO_D, GPIO_MODE_INPUT); 
 
     float dist_a, dist_b, dist_c, dist_d;
 
