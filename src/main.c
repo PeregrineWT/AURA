@@ -18,6 +18,17 @@
 #define PIN_SD_D0   39  
 #define MOUNT_POINT "/sdcard"
 
+// --- NEW: ULTRASONIC PINS (From Schematic) ---
+#define TRIG_A 5
+#define TRIG_B 4
+#define TRIG_C 7
+#define TRIG_D 6
+
+#define ECHO_A 16
+#define ECHO_B 15
+#define ECHO_C 18
+#define ECHO_D 17
+
 // =========================================================================
 // CORE DATA STRUCTURES
 // =========================================================================
@@ -112,6 +123,40 @@ void heartbeat_task(void *pvParameters) {
 
         // Sleep deterministically
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+}
+
+// =========================================================================
+// FEATURE TASK: ULTRASONIC CALIBRATION TEST
+// =========================================================================
+void ultrasonic_test_task(void *pvParameters) {
+    printf("[ULTRASONIC] Task Booted. Entering Calibration Mode.\n");
+    
+    // 1. Configure the 4 Triggers as Outputs
+    gpio_set_direction(TRIG_A, GPIO_MODE_OUTPUT);
+    gpio_set_direction(TRIG_B, GPIO_MODE_OUTPUT);
+    gpio_set_direction(TRIG_C, GPIO_MODE_OUTPUT);
+    gpio_set_direction(TRIG_D, GPIO_MODE_OUTPUT);
+
+    // 2. Configure the 4 Echos as Inputs (Prep for later)
+    gpio_set_direction(ECHO_A, GPIO_MODE_INPUT);
+    gpio_set_direction(ECHO_B, GPIO_MODE_INPUT);
+    gpio_set_direction(ECHO_C, GPIO_MODE_INPUT);
+    gpio_set_direction(ECHO_D, GPIO_MODE_INPUT);
+
+    // 3. Lock Triggers HIGH for Multimeter probing
+    gpio_set_level(TRIG_A, 1);
+    gpio_set_level(TRIG_B, 1);
+    gpio_set_level(TRIG_C, 1);
+    gpio_set_level(TRIG_D, 1);
+
+    printf("[ULTRASONIC] Triggers A, B, C, D are LOCKED HIGH.\n");
+    printf("[INSTRUCTION] Probe your level shifter outputs.\n");
+    printf("[INSTRUCTION] Verify 5.0V output to ensure the HC-SR04 triggers will fire.\n");
+
+    // Keep the task alive, but doing nothing but holding the pins high
+    while(1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -246,6 +291,9 @@ void app_main(void) {
 
     printf("[SYSTEM] Spawning Heartbeat Task...\n");
     xTaskCreate(heartbeat_task, "Heartbeat_Task", 4096, NULL, 1, NULL);
+
+    printf("[SYSTEM] Spawning Ultrasonic Test Task...\n");
+    xTaskCreate(ultrasonic_test_task, "Ultra_Test", 4096, NULL, 5, NULL);
 
     printf("[SYSTEM] Initialization Complete. FreeRTOS Scheduler Active.\n");
     printf("=================================================\n\n");
