@@ -39,8 +39,11 @@ typedef struct {
 } LogMessage_t;
 
 QueueHandle_t data_queue;
-SemaphoreHandle_t sd_card_mutex; // Protects the SD Card pipeline from data collisions
+SemaphoreHandle_t sd_card_mutex; 
 char current_flight_log[64];
+
+// SPI Device Handle (Exported to esp32Hal.h)
+spi_device_handle_t spi_cam_handle; 
 
 // =========================================================================
 // HELPER: AUTO-INCREMENT LOG GENERATOR 
@@ -117,10 +120,10 @@ void camera_task(void *pvParameters) {
         if (image_len > 0) {
             snprintf(image_filename, sizeof(image_filename), MOUNT_POINT "/img_%04d.jpg", image_counter);
             
-            // SECURITY CHECK: Wait for the SD Card Mutex (Block forever if Logger is using it)
+            // SECURITY CHECK: Wait for the SD Card Mutex
             if (xSemaphoreTake(sd_card_mutex, portMAX_DELAY) == pdTRUE) {
                 
-                FILE *img_file = fopen(image_filename, "wb"); // Write Binary mode
+                FILE *img_file = fopen(image_filename, "wb"); 
                 if (img_file != NULL) {
                     uint32_t bytes_read = 0;
                     
@@ -138,12 +141,12 @@ void camera_task(void *pvParameters) {
                     printf("[ERROR] Camera failed to open file on SD card.\n");
                 }
                 
-                // UNLOCK: Hand the SD Card Mutex back so the Logger can write its queued data
+                // UNLOCK: Hand the SD Card Mutex back to the system
                 xSemaphoreGive(sd_card_mutex);
             }
         }
 
-        // Sleep deterministically for exactly 3 seconds before taking the next picture
+        // Sleep deterministically for exactly 3 seconds
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
@@ -168,12 +171,9 @@ void sd_logger_task(void *pvParameters) {
     printf("[SD_CARD] Logger task started. Waiting for sensor data...\n");
 
     while (1) {
-        // If data is waiting in the queue...
         if (xQueueReceive(data_queue, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
             if (f != NULL) {
-                // Request the Mutex before writing to the SD card
                 if (xSemaphoreTake(sd_card_mutex, portMAX_DELAY) == pdTRUE) {
-                    
                     switch (msg.sensor_id) {
                         case 'S': 
                             fprintf(f, "%lu,System Event Logged\n", msg.timestamp); 
@@ -182,8 +182,7 @@ void sd_logger_task(void *pvParameters) {
                             fprintf(f, "%lu,%d\n", msg.timestamp, (int)msg.values[0]); 
                             break;
                     }
-                    
-                    xSemaphoreGive(sd_card_mutex); // Unlock Mutex instantly after write
+                    xSemaphoreGive(sd_card_mutex); 
                 }
             }
         }
@@ -192,7 +191,6 @@ void sd_logger_task(void *pvParameters) {
         TickType_t current_time = xTaskGetTickCount();
         if ((current_time - last_sync_time) >= SYNC_INTERVAL_TICKS) {
             if (f != NULL) {
-                // Request Mutex for the Flush operation
                 if (xSemaphoreTake(sd_card_mutex, portMAX_DELAY) == pdTRUE) {
                     fclose(f);
                     f = fopen(current_flight_log, "a"); 
@@ -235,7 +233,14 @@ void app_main(void) {
     
     // Initialize SPI2 Host 
     if(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) == ESP_OK) {
-        // We configure the bus, but let the Arducam library handle the CS pin automatically
+        spi_device_interface_config_t devcfg = {
+            .clock_speed_hz = 8000000, 
+            .mode = 0,                 
+            .spics_io_num = -1, // CS is handled manually by Arducam using gpio_set_level
+            .queue_size = 7,
+        };
+        // Attach the device and bind it to our global spi_cam_handle
+        spi_bus_add_device(SPI2_HOST, &devcfg, &spi_cam_handle);
         printf("[SYSTEM] SPI Bus Initialized successfully.\n");
     } else {
         printf("[ERROR] Failed to initialize SPI bus.\n");
@@ -276,8 +281,6 @@ void app_main(void) {
     // ---------------------------------------------------------------------
     printf("[SYSTEM] Spawning Tasks...\n");
     xTaskCreate(heartbeat_task, "Heartbeat_Task", 4096, NULL, 1, NULL);
-    
-    // Spawn the Camera task with a larger stack memory size (8192) to handle image buffers
     xTaskCreate(camera_task, "Camera_Task", 8192, NULL, 3, NULL);
 
     printf("[SYSTEM] Initialization Complete. FreeRTOS Scheduler Active.\n");
