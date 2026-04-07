@@ -132,6 +132,9 @@ void camera_task(void *pvParameters) {
                         uint16_t chunk_size = readBuff(&myCAM, image_buffer, 4096);
                         fwrite(image_buffer, 1, chunk_size, img_file);
                         bytes_read += chunk_size;
+
+                        // Yield to the RTOS for 1 tick so the Watchdog doesn't panic
+                        vTaskDelay(pdMS_TO_TICKS(1)); 
                     }
 
                     fclose(img_file);
