@@ -95,8 +95,25 @@ void heartbeat_task(void *pvParameters) {
 // FEATURE TASK: 1080p CAMERA CAPTURE (3-SECOND INTERVAL)
 // =========================================================================
 void camera_task(void *pvParameters) {
-    printf("[CAMERA] Task Booted. Initializing Arducam Mega...\n");
+    printf("[CAMERA] Task Booted. Performing Hardware Pre-Flight Check...\n");
 
+    // 1. Wake up the SPI bus
+    gpio_set_level(CAM_PIN_CS, 0);
+    
+    // 2. Send a dummy byte (0x55) and listen to the echo
+    uint8_t response = arducam_spi_transfer(0x55); 
+    
+    // 3. Release the bus
+    gpio_set_level(CAM_PIN_CS, 1);
+
+    // If power is off or MISO is disconnected, the line stays dead (0x00) or floats (0xFF)
+    if (response == 0x00 || response == 0xFF) {
+        printf("[FATAL] Camera unresponsive (Echo: 0x%02X). Check power and SPI wiring!\n", response);
+        printf("[CAMERA] Aborting task to protect Flight Controller.\n");
+        vTaskDelete(NULL); // Safely self-destructs this task. The drone keeps flying!
+    }
+
+    printf("[CAMERA] Ping successful. Initializing Arducam Mega...\n");
     ArducamCamera myCAM = createArducamCamera(CAM_PIN_CS);
     begin(&myCAM);
 
@@ -225,67 +242,4 @@ void app_main(void) {
     // HARDWARE INIT: SPI BUS (FOR CAMERA)
     // ---------------------------------------------------------------------
     printf("[SYSTEM] Initializing SPI Bus for Camera...\n");
-    spi_bus_config_t buscfg = {
-        .miso_io_num = CAM_PIN_MISO,
-        .mosi_io_num = CAM_PIN_MOSI,
-        .sclk_io_num = CAM_PIN_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4096 
-    };
-    
-    // Initialize SPI2 Host 
-    if(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) == ESP_OK) {
-        spi_device_interface_config_t devcfg = {
-            .clock_speed_hz = 8000000, 
-            .mode = 0,                 
-            .spics_io_num = -1, // CS is handled manually by Arducam using gpio_set_level
-            .queue_size = 7,
-        };
-        // Attach the device and bind it to our global spi_cam_handle
-        spi_bus_add_device(SPI2_HOST, &devcfg, &spi_cam_handle);
-        printf("[SYSTEM] SPI Bus Initialized successfully.\n");
-    } else {
-        printf("[ERROR] Failed to initialize SPI bus.\n");
-    }
-
-    // ---------------------------------------------------------------------
-    // HARDWARE INIT: SD CARD
-    // ---------------------------------------------------------------------
-    printf("[SYSTEM] Initializing SD Card...\n");
-    gpio_reset_pin(PIN_SD_CMD);
-    gpio_reset_pin(PIN_SD_CLK);
-    gpio_reset_pin(PIN_SD_D0);
-
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false, 
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024
-    };
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.flags = SDMMC_HOST_FLAG_1BIT; 
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot_config.clk = PIN_SD_CLK; 
-    slot_config.cmd = PIN_SD_CMD; 
-    slot_config.d0  = PIN_SD_D0; 
-    slot_config.width = 1;
-
-    sdmmc_card_t *card;
-    if (esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card) == ESP_OK) {
-        printf("[SYSTEM] SD Card mounted successfully!\n");
-        generate_next_log_filename();
-        xTaskCreate(sd_logger_task, "SD_Logger_Task", 4096, NULL, 4, NULL);
-    } else {
-        printf("[ERROR] SD Card failed to mount. System will run without logging.\n");
-    }
-
-    // ---------------------------------------------------------------------
-    // SPAWN TASKS
-    // ---------------------------------------------------------------------
-    printf("[SYSTEM] Spawning Tasks...\n");
-    xTaskCreate(heartbeat_task, "Heartbeat_Task", 4096, NULL, 1, NULL);
-    xTaskCreate(camera_task, "Camera_Task", 8192, NULL, 0, NULL);
-
-    printf("[SYSTEM] Initialization Complete. FreeRTOS Scheduler Active.\n");
-    printf("=================================================\n\n");
-}
+    spi_bus_config_t bus
