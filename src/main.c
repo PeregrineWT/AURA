@@ -284,7 +284,7 @@ void app_main(void) {
     // ---------------------------------------------------------------------
     printf("[SYSTEM] Spawning Tasks...\n");
     xTaskCreate(heartbeat_task, "Heartbeat_Task", 4096, NULL, 1, NULL);
-    xTaskCreate(camera_task, "Camera_Task", 8192, NULL, 3, NULL);
+    xTaskCreate(camera_task, "Camera_Task", 8192, NULL, 0, NULL);
 
     printf("[SYSTEM] Initialization Complete. FreeRTOS Scheduler Active.\n");
     printf("=================================================\n\n");
