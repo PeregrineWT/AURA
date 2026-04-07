@@ -11,7 +11,7 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 
-// The Official Arducam C Library (Now linked via your components folder)
+// The Official Arducam C Library (V3 SDK)
 #include "ArducamCamera.h" 
 
 // =========================================================================
@@ -96,9 +96,6 @@ void camera_task(void *pvParameters) {
 
     ArducamCamera myCAM = createArducamCamera(CAM_PIN_CS);
     begin(&myCAM);
-    
-    // Set to 1080p (FHD) to guarantee we finish saving within the 3-second cycle
-    setResolution(&myCAM, SIZE_1080P); 
 
     int image_counter = 1;
     char image_filename[64];
@@ -111,8 +108,11 @@ void camera_task(void *pvParameters) {
     while (1) {
         printf("[CAMERA] Capturing Frame %d...\n", image_counter);
 
+        // V3 Syntax: Pass resolution directly into the capture command
         takePicture(&myCAM, CAM_IMAGE_MODE_FHD, CAM_IMAGE_PIX_FMT_JPG);
-        uint32_t image_len = getTotalLength(&myCAM); 
+        
+        // V3 Syntax: Total length is now a struct property
+        uint32_t image_len = myCAM.totalLength; 
 
         if (image_len > 0) {
             snprintf(image_filename, sizeof(image_filename), MOUNT_POINT "/img_%04d.jpg", image_counter);
