@@ -2,14 +2,11 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/gpio.h"
 #include "driver/i2c.h" 
 
 // =========================================================================
-// HARDWARE PIN DEFINITIONS
+// I2C CONFIGURATION
 // =========================================================================
-#define BLINK_GPIO  47
-
 #define I2C_MASTER_SCL_IO           1      
 #define I2C_MASTER_SDA_IO           2      
 #define I2C_MASTER_NUM              0      
@@ -18,14 +15,9 @@
 #define I2C_MASTER_RX_BUF_DISABLE   0      
 #define I2C_MASTER_TIMEOUT_MS       1000
 
-#define ADDR_EEPROM_IMU             0x50
-#define ADDR_EEPROM_BUZZER          0x51
-#define ADDR_EEPROM_WEATHER         0x57
-
 // =========================================================================
-// UNIVERSAL I2C WRAPPER FUNCTIONS
+// UNIVERSAL I2C WRAPPERS
 // =========================================================================
-
 esp_err_t i2c_master_init(void) {
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
@@ -39,28 +31,12 @@ esp_err_t i2c_master_init(void) {
     return i2c_driver_install(I2C_MASTER_NUM, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
-esp_err_t i2c_ping_device(uint8_t dev_addr) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(50));
-    i2c_cmd_link_delete(cmd);
-    return ret; 
-}
-
-esp_err_t i2c_read_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data_rd, size_t size) {
-    if (size == 0) return ESP_OK;
+esp_err_t i2c_write_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data_wr, size_t size) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, reg_addr, true);
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_READ, true);
-    if (size > 1) {
-        i2c_master_read(cmd, data_rd, size - 1, I2C_MASTER_ACK);
-    }
-    i2c_master_read_byte(cmd, data_rd + size - 1, I2C_MASTER_NACK);
+    i2c_master_write(cmd, data_wr, size, true);
     i2c_master_stop(cmd);
     esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
     i2c_cmd_link_delete(cmd);
@@ -68,52 +44,71 @@ esp_err_t i2c_read_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data_rd, siz
 }
 
 // =========================================================================
-// EEPROM LOGIC: BOARD IDENTIFICATION
+// EEPROM FORMATTER LOGIC
 // =========================================================================
 
-void identify_board(const char* target_name, uint8_t addr) {
-    if (i2c_ping_device(addr) == ESP_OK) {
-        uint8_t read_data[16] = {0};
-        i2c_read_reg(addr, 0x00, read_data, 15);
-        printf("[EEPROM] %-7s (0x%02X): Data=\"%s\"\n", target_name, addr, (char*)read_data);
-    } else {
-        printf("[EEPROM] %-7s (0x%02X): MISSING\n", target_name, addr);
+// 1. The Streamlined 32-Byte Structure
+typedef struct __attribute__((packed)) {
+    uint8_t unique_id;       // 1 byte  (e.g., 1-15)
+    uint8_t version_major;   // 1 byte  (e.g., 1)
+    uint8_t version_minor;   // 1 byte  (e.g., 0)
+    char board_name[29];     // 29 bytes (28 visible chars + '\0')
+} BoardMetadata_t;
+
+// 2. Safe Byte-by-Byte Write Function
+void format_eeprom(uint8_t i2c_addr, BoardMetadata_t *data) {
+    printf("[EEPROM] Formatting board at 0x%02X...\n", i2c_addr);
+    
+    uint8_t *raw_data = (uint8_t*)data;
+    size_t data_size = sizeof(BoardMetadata_t);
+
+    for (int i = 0; i < data_size; i++) {
+        i2c_write_reg(i2c_addr, i, &raw_data[i], 1);
+        vTaskDelay(pdMS_TO_TICKS(10)); // 10ms burn time per byte
     }
+    printf("[EEPROM] Formatting complete for 0x%02X.\n", i2c_addr);
 }
 
-// =========================================================================
-// MAIN
-// =========================================================================
+// 3. Main Routine
 void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(2000)); 
     printf("\n=================================================\n");
-    printf("    --- AURA FULL BUS & EEPROM DIAGNOSTIC ---    \n");
+    printf("     --- AURA EEPROM FORMATTER UTILITY ---       \n");
     printf("=================================================\n");
 
     if (i2c_master_init() == ESP_OK) {
-        printf("[SYSTEM] I2C Initialized. Starting Board ID...\n");
-        identify_board("IMU",     ADDR_EEPROM_IMU);
-        identify_board("Buzzer",  ADDR_EEPROM_BUZZER);
-        identify_board("Weather", ADDR_EEPROM_WEATHER);
+        printf("[SYSTEM] I2C Initialized.\n");
 
-        printf("\n[SYSTEM] Starting Full Bus Scan for Sensors...\n");
-        int found_count = 0;
-        for (int i = 1; i < 127; i++) {
-            if (i2c_ping_device(i) == ESP_OK) {
-                printf("  -> Found 0x%02X", i);
-                // Identifying known addresses
-                if (i == 0x20) printf(" (Buzzer Slave)");
-                if (i == 0x29) printf(" (Light)");
-                if (i == 0x48) printf(" (Temp)");
-                if (i == 0x60) printf(" (Baro)");
-                if (i == 0x68) printf(" (BMI323)");
-                if (i == 0x7E) printf(" (I2C Reserved)");
-                printf("\n");
-                found_count++;
-            }
-        }
-        printf("[SYSTEM] Scan complete. Found %d devices total.\n", found_count);
+        // --- SETUP WEATHER BOARD (ID: 1) ---
+        BoardMetadata_t weather_data = {
+            .unique_id = 1,
+            .version_major = 1,
+            .version_minor = 0,
+        };
+        strncpy(weather_data.board_name, "Weather Board", sizeof(weather_data.board_name));
+        format_eeprom(0x57, &weather_data);
+
+        // --- SETUP IMU BOARD (ID: 6) ---
+        BoardMetadata_t imu_data = {
+            .unique_id = 6,
+            .version_major = 1,
+            .version_minor = 0,
+        };
+        strncpy(imu_data.board_name, "IMU Board", sizeof(imu_data.board_name));
+        format_eeprom(0x50, &imu_data);
+
+        // --- SETUP BUZZER BOARD (ID: 11) ---
+        BoardMetadata_t buzzer_data = {
+            .unique_id = 11,
+            .version_major = 1,
+            .version_minor = 0,
+        };
+        strncpy(buzzer_data.board_name, "Buzzer Board", sizeof(buzzer_data.board_name));
+        format_eeprom(0x51, &buzzer_data);
+
+        printf("\n[SYSTEM] All EEPROMs securely formatted!\n");
+    } else {
+        printf("[ERROR] Failed to initialize I2C.\n");
     }
-
-    printf("=================================================\n\n");
+    printf("=================================================\n");
 }
