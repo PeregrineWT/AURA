@@ -201,7 +201,8 @@ void weather_board_task(void *pvParameter) {
         
         // Temp
         if (i2c_read_reg(ADDR_TEMP_P3T1750, 0x00, raw_temp, 2) == ESP_OK) {
-            msg.values[0] = ((raw_temp[0] << 8) | raw_temp[1] >> 4) * 0.0625f;
+            int16_t temp_val = (raw_temp[0] << 8) | raw_temp[1]; // Combine safely
+            msg.values[0] = (temp_val >> 4) * 0.0625f;           // Shift and scale
         }
         // Light
         if (i2c_read_reg(ADDR_LIGHT_LTR329, 0x88, raw_light, 4) == ESP_OK) {
