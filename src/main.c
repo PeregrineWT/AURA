@@ -36,11 +36,19 @@
 #define I2C_MASTER_RX_BUF_DISABLE   0      
 #define I2C_MASTER_TIMEOUT_MS       1000
 
-// I2C Addresses
+// I2C Sensor Addresses
 #define ADDR_IMU_BMI323             0x68
 #define ADDR_BARO_MPL3115           0x60
 #define ADDR_TEMP_P3T1750           0x48
 #define ADDR_LIGHT_LTR329           0x29
+
+// AURA Modular EEPROM Data
+#define ADDR_EEPROM_IMU             0x50
+#define EXPECTED_ID_IMU             6
+#define ADDR_EEPROM_BUZZER          0x51
+#define EXPECTED_ID_BUZZER          11
+#define ADDR_EEPROM_WEATHER         0x57
+#define EXPECTED_ID_WEATHER         1
 
 // Ultrasonic Pins
 #define TRIG_A 5
@@ -66,6 +74,14 @@ typedef struct {
     uint32_t timestamp;  
     float values[7];     
 } LogMessage_t;
+
+// Standardized 32-Byte AURA EEPROM Map
+typedef struct __attribute__((packed)) {
+    uint8_t unique_id;
+    uint8_t hw_version_major;
+    uint8_t hw_version_minor;
+    char board_name[29]; 
+} AuraBoardEEPROM_t;
 
 QueueHandle_t data_queue;
 SemaphoreHandle_t sd_card_mutex; 
@@ -117,7 +133,6 @@ esp_err_t i2c_read_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data_rd, siz
     return ret;
 }
 
-// BMI323 Custom Wrappers
 esp_err_t bmi323_read_reg(uint8_t reg_addr, uint8_t *data, size_t size) {
     uint8_t buffer[24]; 
     esp_err_t err = i2c_read_reg(ADDR_IMU_BMI323, reg_addr, buffer, size + 2);
@@ -127,6 +142,93 @@ esp_err_t bmi323_read_reg(uint8_t reg_addr, uint8_t *data, size_t size) {
 esp_err_t bmi323_write_reg(uint8_t reg_addr, uint16_t data_16) {
     uint8_t buffer[2] = { data_16 & 0xFF, (data_16 >> 8) & 0xFF };
     return i2c_write_reg(ADDR_IMU_BMI323, reg_addr, buffer, 2);
+}
+
+// =========================================================================
+// HELPER: I2C BUS SCANNING & EEPROM CHECK (SEQUENTIAL FORMAT)
+// =========================================================================
+typedef struct {
+    uint8_t address;
+    const char *description;
+} I2cDeviceDesc_t;
+
+const I2cDeviceDesc_t aura_master_i2c_list[] = {
+    {0x10, "Buzzer Board (S3 Command Slave)"}, 
+    {0x29, "LTR329 Light Sensor"},
+    {0x39, "LTR329 Light Sensor (Alternative)"},
+    {0x48, "P3T1750 Temp Sensor"},
+    {0x49, "P3T1750 Temp Sensor (Alternative)"},
+    {0x50, "IMU Board EEPROM"},
+    {0x51, "Buzzer Board EEPROM"},
+    {0x57, "Weather Board EEPROM"},
+    {0x60, "MPL3115 Barometer"},
+    {0x68, "BMI323 IMU"}
+};
+#define AURA_I2C_LIST_SIZE (sizeof(aura_master_i2c_list) / sizeof(I2cDeviceDesc_t))
+
+const char* get_i2c_description(uint8_t addr) {
+    for (int i = 0; i < AURA_I2C_LIST_SIZE; i++) {
+        if (aura_master_i2c_list[i].address == addr) {
+            return aura_master_i2c_list[i].description;
+        }
+    }
+    return "Unknown Device"; 
+}
+
+bool check_i2c_device(uint8_t addr) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(50));
+    i2c_cmd_link_delete(cmd);
+    return (ret == ESP_OK);
+}
+
+void i2c_bus_scan_sequential() {
+    uint8_t count = 0;
+    printf("\n[SYSTEM] Starting sequential I2C bus scan...\n");
+    printf("===========================================\n");
+
+    for (uint8_t i = 1; i < 0x78; i++) { 
+        if (check_i2c_device(i)) {
+            const char* desc = get_i2c_description(i);
+            printf(" -> Found device at 0x%02X (%s)\n", i, desc);
+            count++;
+        }
+    }
+
+    if (count == 0) {
+        printf("[SYSTEM] No I2C devices responded.\n");
+    } else {
+        printf("===========================================\n");
+        printf("[SYSTEM] Scan complete. Found %d active devices.\n\n", count);
+    }
+}
+
+bool read_board_eeprom(uint8_t eeprom_addr, uint8_t expected_id) {
+    AuraBoardEEPROM_t board_data;
+
+    esp_err_t err = i2c_read_reg(eeprom_addr, 0x00, (uint8_t*)&board_data, sizeof(AuraBoardEEPROM_t));
+
+    if (err == ESP_OK) {
+        board_data.board_name[28] = '\0'; 
+
+        printf(" -> [OK] EEPROM at 0x%02X Responded.\n", eeprom_addr);
+        printf("      Board: %s (v%d.%d)\n", board_data.board_name, board_data.hw_version_major, board_data.hw_version_minor);
+        printf("      ID:    %d\n", board_data.unique_id);
+        
+        if (board_data.unique_id == expected_id) {
+            printf("      Status: ID Match Confirmed.\n");
+            return true;
+        } else {
+            printf("      Status: [FAIL] ID Mismatch! Expected %d.\n", expected_id);
+            return false;
+        }
+    } else {
+        printf(" -> [FAIL] EEPROM at 0x%02X did not respond.\n", eeprom_addr);
+        return false;
+    }
 }
 
 // =========================================================================
@@ -294,12 +396,23 @@ void ultrasonic_task(void *pvParameter) {
 }
 
 // =========================================================================
+// FEATURE TASK: BUZZER CONTROL (Ground Station Listener)
+// =========================================================================
+void buzzer_task(void *pvParameter) {
+    printf("[BUZZER] Task active. Waiting for Ground Station commands...\n");
+    
+    while(1) {
+        // --- FUTURE ESP-NOW LOGIC GOES HERE ---
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
+    }
+}
+
+// =========================================================================
 // FEATURE TASK: 1080p CAMERA CAPTURE (3-SECOND INTERVAL)
 // =========================================================================
 void camera_task(void *pvParameters) {
     printf("[CAMERA] Task Booted. Performing Hardware Pre-Flight Check...\n");
 
-    // Explicitly initialize the Chip Select pin as an output so it doesn't float
     gpio_set_direction(CAM_PIN_CS, GPIO_MODE_OUTPUT);
     gpio_set_level(CAM_PIN_CS, 1); 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -317,7 +430,6 @@ void camera_task(void *pvParameters) {
     int image_counter = 1;
     char image_filename[64];
     
-    // Request safe DMA memory so the SPI driver doesn't crash S3
     uint8_t *image_buffer = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_DMA);
     if (image_buffer == NULL) {
         printf("[FATAL] Out of DMA memory for camera buffer!\n");
@@ -336,7 +448,6 @@ void camera_task(void *pvParameters) {
         if (image_len > 0) {
             snprintf(image_filename, sizeof(image_filename), MOUNT_POINT "/img_%04d.jpg", image_counter);
             
-            // MUTEX: Wait for permission to talk to the SD Card
             if (xSemaphoreTake(sd_card_mutex, portMAX_DELAY) == pdTRUE) {
                 FILE *img_file = fopen(image_filename, "wb"); 
                 if (img_file != NULL) {
@@ -346,12 +457,11 @@ void camera_task(void *pvParameters) {
                         uint16_t chunk_size = readBuff(&myCAM, image_buffer, 4096);
                         fwrite(image_buffer, 1, chunk_size, img_file);
                         bytes_read += chunk_size;
-                        vTaskDelay(pdMS_TO_TICKS(1)); // Watchdog breathing room
+                        vTaskDelay(pdMS_TO_TICKS(1)); 
                     }
                     fclose(img_file);
                     printf("[CAMERA] Saved %s (%lu bytes)\n", image_filename, image_len);
                     
-                    // Push the camera event into the data queue
                     LogMessage_t cam_msg;
                     cam_msg.sensor_id = 'C';
                     cam_msg.timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -363,7 +473,6 @@ void camera_task(void *pvParameters) {
                     printf("[ERROR] Camera failed to open file on SD card.\n");
                 }
                 
-                // UNLOCK: Give permission back
                 xSemaphoreGive(sd_card_mutex);
             }
         }
@@ -383,7 +492,6 @@ void sd_logger_task(void *pvParameters) {
         vTaskDelete(NULL);
     }
     
-    // --- UPDATED MASTER HEADER STRING ---
     fprintf(f, "Time_HB,State_HB,Time_IMU,Accel_X,Accel_Y,Accel_Z,Gyro_X,Gyro_Y,Gyro_Z,Time_WTR,Temp_C,Light_Vis,Light_IR,Baro_Pa,Time_US,US_Front,US_Back,US_Left,US_Right,Time_BTN,Btn_Up,Btn_Down,Btn_Left,Btn_Right,Time_CAM,Cam_Event\n"); 
     fclose(f); 
 
@@ -396,7 +504,6 @@ void sd_logger_task(void *pvParameters) {
     while (1) {
         if (xQueueReceive(data_queue, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
             if (f != NULL) {
-                // MUTEX: Protect FAT32 while CSV writing
                 if (xSemaphoreTake(sd_card_mutex, portMAX_DELAY) == pdTRUE) {
                     switch (msg.sensor_id) {
                         case 'H': 
@@ -419,7 +526,6 @@ void sd_logger_task(void *pvParameters) {
                             fprintf(f, ",,,,,,,,,,,,,,,,,,,%lu,%.0f,%.0f,%.0f,%.0f\n", 
                                     msg.timestamp, msg.values[0], msg.values[1], msg.values[2], msg.values[3]);
                             break;
-                        // --- THE NEW CAMERA CSV ENTRY (24 Commas) ---
                         case 'C':
                             fprintf(f, ",,,,,,,,,,,,,,,,,,,,,,,,%lu,img_%04d.jpg taken!\n", 
                                     msg.timestamp, (int)msg.values[0]);
@@ -430,11 +536,9 @@ void sd_logger_task(void *pvParameters) {
             }
         }
 
-        // --- REAL-TIME 2.5-SECOND FLUSH CHECK ---
         TickType_t current_time = xTaskGetTickCount();
         if ((current_time - last_sync_time) >= SYNC_INTERVAL_TICKS) {
             if (f != NULL) {
-                // MUTEX: Protect FAT32 while closing/syncing file
                 if (xSemaphoreTake(sd_card_mutex, portMAX_DELAY) == pdTRUE) {
                     fclose(f);
                     f = fopen(current_flight_log, "a"); 
@@ -458,11 +562,9 @@ void app_main(void) {
     gpio_reset_pin(BLINK_GPIO);
     gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
 
-    // Create RTOS Objects
     sd_card_mutex = xSemaphoreCreateMutex(); 
     data_queue = xQueueCreate(1000, sizeof(LogMessage_t));
 
-    // Mount SD Card
     printf("[SYSTEM] Initializing SD Card...\n");
     gpio_reset_pin(PIN_SD_CMD);
     gpio_reset_pin(PIN_SD_CLK);
@@ -490,9 +592,6 @@ void app_main(void) {
         printf("[ERROR] SD Card failed to mount. System will run without logging.\n");
     }
 
-    // ---------------------------------------------------------------------
-    // HARDWARE INIT: SPI BUS (FOR CAMERA)
-    // ---------------------------------------------------------------------
     printf("[SYSTEM] Initializing SPI Bus for Camera...\n");
     spi_bus_config_t buscfg = {
         .miso_io_num = CAM_PIN_MISO,
@@ -505,7 +604,7 @@ void app_main(void) {
     
     if(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) == ESP_OK) {
         spi_device_interface_config_t devcfg = {
-            .clock_speed_hz = 4000000, // Locked to 4MHz for max stability 
+            .clock_speed_hz = 4000000,  
             .mode = 0,                 
             .spics_io_num = -1, 
             .queue_size = 7,
@@ -518,18 +617,55 @@ void app_main(void) {
     }
 
     // ---------------------------------------------------------------------
-    // HARDWARE INIT: I2C SENSORS
+    // HARDWARE INIT: I2C SCAN & DYNAMIC TASK SPAWNING
     // ---------------------------------------------------------------------
     if (i2c_master_init() == ESP_OK) {
-        printf("[SYSTEM] I2C Bus Active. Spawning sensor tasks...\n");
-        xTaskCreate(imu_task, "IMU_Task", 4096, NULL, 5, NULL);
-        xTaskCreate(weather_board_task, "Weather_Task", 4096, NULL, 5, NULL);
+        printf("[SYSTEM] I2C Bus Active.\n");
+        
+        // Output the clean sequential I2C bus scan
+        i2c_bus_scan_sequential();
+        
+        // --- CHECK 1: THE IMU BOARD ---
+        printf("Checking for IMU Board...\n");
+        if (check_i2c_device(ADDR_EEPROM_IMU)) {
+            if (read_board_eeprom(ADDR_EEPROM_IMU, EXPECTED_ID_IMU)) {
+                printf("[SYSTEM] IMU Board Validated. Spawning task...\n");
+                xTaskCreate(imu_task, "IMU_Task", 4096, NULL, 5, NULL);
+            }
+        } else {
+            printf("[INFO] IMU EEPROM not detected. Task disabled.\n");
+        }
+
+        // --- CHECK 2: THE WEATHER BOARD ---
+        printf("\nChecking for Weather Board...\n");
+        if (check_i2c_device(ADDR_EEPROM_WEATHER)) {
+            if (read_board_eeprom(ADDR_EEPROM_WEATHER, EXPECTED_ID_WEATHER)) {
+                printf("[SYSTEM] Weather Board Validated. Spawning task...\n");
+                xTaskCreate(weather_board_task, "Weather_Task", 4096, NULL, 5, NULL);
+            }
+        } else {
+            printf("[INFO] Weather EEPROM not detected. Task disabled.\n");
+        }
+
+        // --- CHECK 3: THE BUZZER BOARD (ESP32-C3 Slave) ---
+        printf("\nChecking for Buzzer Board...\n");
+        if (check_i2c_device(ADDR_EEPROM_BUZZER)) {
+            if (read_board_eeprom(ADDR_EEPROM_BUZZER, EXPECTED_ID_BUZZER)) {
+                printf("[SYSTEM] Buzzer Board Validated. Spawning task...\n");
+                xTaskCreate(buzzer_task, "Buzzer_Task", 4096, NULL, 5, NULL);
+            }
+        } else {
+            printf("[INFO] Buzzer EEPROM not detected. Task disabled.\n");
+        }
+        
+    } else {
+        printf("[ERROR] Failed to initialize I2C bus.\n");
     }
 
     // ---------------------------------------------------------------------
     // HARDWARE INIT: ULTRASONIC ARRAY
     // ---------------------------------------------------------------------
-    printf("[SYSTEM] Initializing Ultrasonic Array...\n");
+    printf("\n[SYSTEM] Initializing Ultrasonic Array...\n");
     gpio_set_direction(TRIG_A, GPIO_MODE_OUTPUT);
     gpio_set_direction(TRIG_B, GPIO_MODE_OUTPUT);
     gpio_set_direction(TRIG_C, GPIO_MODE_OUTPUT);
@@ -539,10 +675,11 @@ void app_main(void) {
     gpio_set_direction(ECHO_C, GPIO_MODE_INPUT);
     gpio_set_direction(ECHO_D, GPIO_MODE_INPUT); 
     
-    printf("[SYSTEM] Spawning Tasks...\n");
+    printf("[SYSTEM] Spawning Core Tasks...\n");
     xTaskCreate(ultrasonic_task, "Ultra_Task", 4096, NULL, 5, NULL);
     xTaskCreate(heartbeat_task, "Heartbeat_Task", 4096, NULL, 1, NULL);
 
-    printf("[SYSTEM] Initialization Complete. FreeRTOS Scheduler Active.\n");
+    printf("\n=================================================\n");
+    printf("[SYSTEM] Initialization Complete. Scheduler Active.\n");
     printf("=================================================\n\n");
 }
