@@ -38,8 +38,9 @@
 #define PIN_SD_D0   39  
 #define MOUNT_POINT "/sdcard"
 
-// Battery Reading Pin
+// Battery Reading Pin & Calibration
 #define BATTERY_PIN 3 // Corresponds to ADC1_CHANNEL_2 on ESP32-S3
+#define BATTERY_CALIBRATION_OFFSET 1.0f // Compensates for ESP32 ADC high-end droop (0.1V * 10)
 
 // I2C Pins
 #define I2C_MASTER_SCL_IO           1      
@@ -130,7 +131,8 @@ spi_device_handle_t spi_cam_handle;
 // ADC Handle Global
 adc_oneshot_unit_handle_t adc1_handle;
 
-uint8_t ground_mac[] = {0x10,0xB4,0x1D,0xC3,0xE8,0x68};
+// UPDATE THIS IF YOUR GROUND MAC CHANGES
+uint8_t ground_mac[] = {0x10,0xB4,0x1D,0xD0,0x9C,0x28};
 
 // =========================================================================
 // TELEMETRY HELPER FUNCTIONS
@@ -303,9 +305,7 @@ void i2c_bus_scan_sequential() {
     uint8_t count = 0;
     TLOG("\n[SYSTEM] Starting sequential I2C bus scan...\n");
     for (uint8_t i = 1; i < 0x78; i++) { 
-        
         if (i == 0x20) continue; 
-
         if (check_i2c_device(i)) {
             TLOG(" -> Found device at 0x%02X (%s)\n", i, get_i2c_description(i));
             count++;
@@ -365,7 +365,7 @@ void receive_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
         
         xQueueSendFromISR(data_queue, &btn_msg, NULL); 
 
-        switch(cmd_char) {	
+        switch(cmd_char) {  
             case 's': 
             case 'f': 
             case 'm': 
@@ -457,7 +457,9 @@ void battery_task(void *pvParameter) {
         adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw);
         
         float v_pin = (adc_raw / 4095.0f) * 3.3f;
-        float v_batt = v_pin * 10.0f; 
+        
+        // Multiplier + Calibration Offset applied here!
+        float v_batt = (v_pin * 10.0f) + BATTERY_CALIBRATION_OFFSET; 
         
         float percentage = ((v_batt - 19.8f) / (25.2f - 19.8f)) * 100.0f;
         if (percentage > 100.0f) percentage = 100.0f;
@@ -607,29 +609,9 @@ void camera_task(void *pvParameters) {
     gpio_set_level(CAM_PIN_CS, 1); 
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    // --- MANUAL SPI PROBE (PRE-FLIGHT CHECK) ---
-    // Sends a dummy transaction to check if the hardware actually responds.
-    // Prevents the Arducam SDK from locking CPU1 in an infinite busy-wait loop.
-    uint8_t probe_tx[2] = {0x00, 0x00}; 
-    uint8_t probe_rx[2] = {0, 0};
-    spi_transaction_t t;
-    memset(&t, 0, sizeof(t));
-    t.length = 16;
-    t.tx_buffer = probe_tx;
-    t.rx_buffer = probe_rx;
+    // The overly-aggressive manual SPI probe has been removed here.
+    // The hardware MISO pull-up in app_main is sufficient to prevent Watchdog crashes!
 
-    gpio_set_level(CAM_PIN_CS, 0);
-    spi_device_transmit(spi_cam_handle, &t);
-    gpio_set_level(CAM_PIN_CS, 1);
-
-    // If MISO is pulled HIGH (nothing attached), it reads 0xFF. 
-    // If floating LOW, it reads 0x00.
-    if (probe_rx[1] == 0x00 || probe_rx[1] == 0xFF) {
-        TLOG("[FATAL] Camera physically unplugged. Terminating task safely.\n");
-        vTaskDelete(NULL); 
-    }
-
-    // Hardware validated. Safe to yield to Arducam SDK.
     ArducamCamera myCAM = createArducamCamera(CAM_PIN_CS);
     begin(&myCAM);
     
@@ -807,8 +789,7 @@ void app_main(void) {
     spi_bus_config_t buscfg = {.miso_io_num = CAM_PIN_MISO, .mosi_io_num = CAM_PIN_MOSI, .sclk_io_num = CAM_PIN_SCK, .quadwp_io_num = -1, .quadhd_io_num = -1, .max_transfer_sz = 4096};
     if(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) == ESP_OK) {
         
-        // --- NEW: RE-APPLY MISO PULL-UP ---
-        // spi_bus_initialize wipes pin configs. We must force the hardware pull-up here!
+        // Re-apply MISO Pull-up after spi_bus_initialize to prevent watchdog crash when unplugged
         gpio_set_pull_mode(CAM_PIN_MISO, GPIO_PULLUP_ONLY); 
         
         spi_device_interface_config_t devcfg = {.clock_speed_hz = 4000000, .mode = 0, .spics_io_num = -1, .queue_size = 7};
